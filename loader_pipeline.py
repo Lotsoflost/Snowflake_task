@@ -1,6 +1,7 @@
 from sqlalchemy import text
 import pandas as pd
 import re
+import json
 from datetime import datetime, timezone
 
 import utils
@@ -11,7 +12,6 @@ def normalize_columns(cols):
 
 
 def record_log(proc_name, start_ts, end_ts, rows_loaded, status, message, duration_sec):
-    # твоя процедура теперь ожидает rows_inserted (не rows)
     with utils.ENGINE.begin() as conn:
         conn.execute(
             text("""
@@ -39,10 +39,15 @@ def record_log(proc_name, start_ts, end_ts, rows_loaded, status, message, durati
         )
 
 
+def call_proc(conn, sql: str):
+    """Exec CALL and return first column (Snowflake procs return 1 col when RETURNS ...)."""
+    row = conn.execute(text(sql)).fetchone()
+    return row[0] if row else None
+
+
 if __name__ == "__main__":
-    # Названия таблиц (одна таблица)
-    base_table = "airline_dataset"       # как хочешь назвать логически
-    temp_table = f"{base_table}_temp"    # итоговая temp
+    base_table = "airline_dataset"
+    temp_table = f"{base_table}_temp"
 
     start_ts = datetime.now(timezone.utc)
     status = "OK"
@@ -53,20 +58,15 @@ if __name__ == "__main__":
         print(f"Reading CSV: {utils.SRC_FILE}")
         df = pd.read_csv(utils.SRC_FILE)
 
-        # normalize columns
         df.columns = normalize_columns(df.columns)
-
-        # tech колонка
         df["update_ts"] = datetime.now(timezone.utc)
 
         print(f"Writing to Snowflake: {utils.DB_SCHEMA}.{temp_table} ...")
-
-        # Важно: в Snowflake лучше явно передать schema=..., name=...
         df.to_sql(
             name=temp_table,
             con=utils.ENGINE,
             schema=utils.DB_SCHEMA,
-            if_exists="replace",   # для temp ок
+            if_exists="replace",
             index=False,
             method="multi",
             chunksize=10_000
@@ -93,54 +93,120 @@ if __name__ == "__main__":
             duration_sec=duration_sec
         )
         print(f"Logged: {status} ({duration_sec:.3f}s)")
-# -------------------------------------------------
-    # NOW CALL fn_upload_src (only if temp load OK)
+
+    # -------------------------------------------------
+    # SRC load: temp -> SRC
     # -------------------------------------------------
     if status == "OK":
-        print("Calling fn_upload_src() to push temp -> SRC...")
+        print("Calling SP_UPLOAD_SRC() to push temp -> SRC...")
 
-        upload_start_ts = datetime.now()
+        upload_start_ts = datetime.now(timezone.utc)
         upload_status = "OK"
-        upload_msg = "sp_upload_src completed successfully"
+        upload_msg = "SP_UPLOAD_SRC completed successfully"
+        updated_tables = None
 
-        updated_tables = ''
         try:
             with utils.ENGINE.begin() as conn:
-                result = conn.execute(
-                    text(f"CALL {utils.DB_SCHEMA}.sp_upload_src();")
-                ).fetchone()
-                updated_tables = result[0] if result else None
-            print("sp_upload_src() finished.")
+                updated_tables = call_proc(conn, f"CALL {utils.DB_SCHEMA}.SP_UPLOAD_SRC()")
+
+            # может прийти строкой -> в dict
+            if isinstance(updated_tables, str):
+                updated_tables = json.loads(updated_tables)
+
+            print("SP_UPLOAD_SRC() finished.")
 
         except Exception as e:
             upload_status = "ERROR"
-            upload_msg = f"sp_upload_src failed: {e}"
-            global_status = "ERROR"
-            global_msg = "temp load ok, but fn_upload_src failed"
+            upload_msg = f"SP_UPLOAD_SRC failed: {e}"
             print(upload_msg)
 
         finally:
-            upload_end_ts = datetime.now()
+            upload_end_ts = datetime.now(timezone.utc)
             upload_duration_sec = (upload_end_ts - upload_start_ts).total_seconds()
             record_log(
-                f'fn_upload_src',
-                upload_start_ts,
-                upload_end_ts,
-                None,
-                upload_status,
-                upload_msg[:250],
-                upload_duration_sec
+                proc_name="SP_UPLOAD_SRC",
+                start_ts=upload_start_ts,
+                end_ts=upload_end_ts,
+                rows_loaded=None,
+                status=upload_status,
+                message=upload_msg[:250],
+                duration_sec=upload_duration_sec
             )
 
-        print(f"finished src layer {updated_tables=}")
+        print(f"finished src layer: {updated_tables=}")
 
-        # # Trigger downstream refreshes based on fn_upload_src result
-        # if updated_tables:
-        #     tables = [table for table, value in updated_tables.items() if value > 1]
-        #     with ENGINE.begin() as conn:
-        #         for upd_table in tables:
-        #             if upd_table == "fct_sales_data":
-        #                 conn.execute(text(f"CALL {utils.DB_SCHEMA}.sp_refresh_fct();"))
-        #             else:
-        #                 conn.execute(text(f"CALL {utils.DB_SCHEMA}.sp_refresh_dims('{upd_table}');"))
-        #             print(f"{upd_table} is refreshed.")
+        # -------------------------------------------------
+        # Downstream refresh: DIMS -> FCT (only if SRC changed)
+        # -------------------------------------------------
+        src_rows = 0
+        if isinstance(updated_tables, dict):
+            src_rows = int(updated_tables.get("SRC_AIRLINE_DATASET", 0) or 0)
+
+        if upload_status == "OK" and src_rows > 0:
+            print(f"SRC changed ({src_rows} new rows). Refreshing DIMS and FACT...")
+
+            # 1) refresh dims
+            dims_start_ts = datetime.now(timezone.utc)
+            dims_status = "OK"
+            dims_msg = "dims refreshed successfully"
+
+            try:
+                with utils.ENGINE.begin() as conn:
+                    call_proc(conn, f"CALL {utils.DB_SCHEMA}.SP_REFRESH_DIMS('dim_customer')")
+                    call_proc(conn, f"CALL {utils.DB_SCHEMA}.SP_REFRESH_DIMS('dim_airport')")
+                print("DIMS refreshed.")
+
+            except Exception as e:
+                dims_status = "ERROR"
+                dims_msg = f"SP_REFRESH_DIMS failed: {e}"
+                print(dims_msg)
+
+            finally:
+                dims_end_ts = datetime.now(timezone.utc)
+                dims_duration = (dims_end_ts - dims_start_ts).total_seconds()
+                record_log(
+                    proc_name="SP_REFRESH_DIMS",
+                    start_ts=dims_start_ts,
+                    end_ts=dims_end_ts,
+                    rows_loaded=None,
+                    status=dims_status,
+                    message=dims_msg[:250],
+                    duration_sec=dims_duration
+                )
+
+            # 2) refresh fact only if dims ok
+            if dims_status == "OK":
+                fct_start_ts = datetime.now(timezone.utc)
+                fct_status = "OK"
+                fct_msg = "fact refreshed successfully"
+                try:
+                    with utils.ENGINE.begin() as conn:
+                        fct_out = call_proc(conn, f"CALL {utils.DB_SCHEMA}.SP_REFRESH_FCT()")
+                    # fct_out может быть VARIANT с rows
+                    if isinstance(fct_out, str):
+                        try:
+                            fct_out = json.loads(fct_out)
+                        except Exception:
+                            pass
+                    print("FACT refreshed. Output:", fct_out)
+
+                except Exception as e:
+                    fct_status = "ERROR"
+                    fct_msg = f"SP_REFRESH_FCT failed: {e}"
+                    print(fct_msg)
+
+                finally:
+                    fct_end_ts = datetime.now(timezone.utc)
+                    fct_duration = (fct_end_ts - fct_start_ts).total_seconds()
+                    record_log(
+                        proc_name="SP_REFRESH_FCT",
+                        start_ts=fct_start_ts,
+                        end_ts=fct_end_ts,
+                        rows_loaded=None,
+                        status=fct_status,
+                        message=fct_msg[:250],
+                        duration_sec=fct_duration
+                    )
+
+        else:
+            print(f"No SRC changes detected (src_rows={src_rows}, upload_status={upload_status}). Skipping DIMS/FCT.")

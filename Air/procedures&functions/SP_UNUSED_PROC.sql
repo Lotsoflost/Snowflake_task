@@ -1,0 +1,9 @@
+CREATE OR REPLACE PROCEDURE AIR_TEST.SP_UNUSED_PROC()
+RETURNS STRING
+LANGUAGE SQL
+AS
+$$
+BEGIN
+    RETURN 'This procedure exists only in repository';
+END;
+$$;

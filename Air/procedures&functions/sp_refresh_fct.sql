@@ -142,4 +142,4 @@ BEGIN
 END;
 $$;
 
-call SP_REFRESH_FCT()
+-- call SP_REFRESH_FCT()

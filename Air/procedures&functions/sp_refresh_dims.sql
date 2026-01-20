@@ -379,22 +379,6 @@ BEGIN
 END;
 $$;
 
-call SP_REFRESH_DIMS('dim_airport');
-call SP_REFRESH_DIMS('dim_customer');
+-- call SP_REFRESH_DIMS('dim_airport');
+-- call SP_REFRESH_DIMS('dim_customer');
 
-
-select * from DIM_AIRPORT order by AIRPORT_NAME;
-select * from DIM_CUSTOMER order by PASSENGER_ID;
-
-select count( PASSENGER_ID) from DIM_CUSTOMER;
-
-
-
-select C.CUSTOMER_SK, A.AIRPORT_SK, DEPARTURE_DATE,
-       ARRIVAL_AIRPORT, PILOT_NAME, FLIGHT_STATUS, TICKET_TYPE,
-       PASSENGER_STATUS, UPDATE_TS, 'AIRLINE' as record_source
-from SRC_AIRLINE_DATASET S
-         join DIM_CUSTOMER C on s.PASSENGER_ID = c.PASSENGER_ID
-         and S.DEPARTURE_DATE between C.EFFECTIVE_FROM_TS and C.EFFECTIVE_TO_TS
-         join DIM_AIRPORT A on A.AIRPORT_NAME = S.AIRPORT_NAME
-         and S.DEPARTURE_DATE between A.EFFECTIVE_FROM_TS and A.EFFECTIVE_TO_TS

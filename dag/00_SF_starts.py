@@ -36,10 +36,10 @@ def fetch_and_prepare_csv(
     """
     hook = HttpHook(method="GET", http_conn_id=http_conn_id)
 
-    # Получаем хост из настроек коннектора
+    # Getting host
     host = hook.get_connection(http_conn_id).host
 
-    # Используем хост в запросе (или для других целей)
+    # Using host
     resp = hook.run(host)
     resp.raise_for_status()
     content = resp.content
@@ -75,7 +75,7 @@ def print_previous_data(**kwargs):
 
 def load_clean_csv_to_snowflake(
     snowflake_conn_id: str,
-    table_fqn: str,          # например "AIR_TEST.AIRLINE_DATASET_TEMP"
+    table_fqn: str,          # "AIR_TEST.AIRLINE_DATASET_TEMP"
     local_csv_path: str,     # "/tmp/airline_dataset_clean.csv"
 ):
     """
@@ -114,7 +114,6 @@ def load_clean_csv_to_snowflake(
     truncate_sql = f"TRUNCATE TABLE {table_fqn};"
 
     # internal stage of the table: @%<table_name>
-    # если table_fqn со схемой, для stage нужно имя таблицы без схемы/базы
     table_name_only = table_fqn.split(".")[-1]
     put_sql = f"PUT file://{local_csv_path} @%{table_name_only} AUTO_COMPRESS=TRUE OVERWRITE=TRUE;"
 
@@ -126,14 +125,12 @@ def load_clean_csv_to_snowflake(
     PURGE = TRUE;
     """
 
-    # Выполняем всё в одном соединении
     with hook.get_conn() as conn:
         cur = conn.cursor()
         try:
             cur.execute(create_sql)
             cur.execute(truncate_sql)
 
-            # PUT часто лучше выполнять отдельно
             cur.execute(put_sql)
 
             cur.execute(copy_sql)
@@ -170,7 +167,7 @@ def call_sp_upload_src_and_push_xcom(
             rows_inserted = int(result.get("SRC_AIRLINE_DATASET", 0))
             print(f"SRC rows inserted: {rows_inserted}")
 
-            return rows_inserted   # 👈 ЭТО ПОПАДЁТ В XCOM
+            return rows_inserted   #  XCOM
 
         finally:
             cur.close()
@@ -201,7 +198,7 @@ with DAG(
         python_callable=fetch_and_prepare_csv,
         op_kwargs={
             "http_conn_id": "air_flight_gdrive",
-            # куда сохраняем файл внутри Airflow контейнера/окружения
+            # store inside Airflow container
             "output_path": "/tmp/airline_dataset_clean.csv",
         },
     )
